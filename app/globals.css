@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #111827;
+  background: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  background: #ffffff;
+  color: #111827;
+}
+
+::selection {
+  background: rgba(90, 120, 240, 0.22);
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, #7b3ff2 0%, #5a78f0 34%, #3a9af2 68%, #22c7d9 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.glass-panel {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(229, 234, 240, 0.84);
+  box-shadow: 0 24px 80px rgba(17, 24, 39, 0.1);
+  backdrop-filter: blur(18px);
+}
+
+.section-pad {
+  padding-top: 5rem;
+  padding-bottom: 5rem;
+}
+
+@media (max-width: 768px) {
+  .section-pad {
+    padding-top: 3.5rem;
+    padding-bottom: 3.5rem;
+  }
+}

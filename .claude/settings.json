@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx next *)",
+      "Bash(npm install *)",
+      "Bash(npx eslint *)",
+      "Bash(npm ls *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3456/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3456/contact)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3456/portfolio)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3456/pricing)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3456/systems)",
+      "Bash(lsof -ti:3456)",
+      "Bash(xargs kill)"
+    ]
+  }
+}
