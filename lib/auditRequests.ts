@@ -22,7 +22,8 @@ export type AuditRequestRecord = AuditRequestInput & {
   followUpDate: string;
 };
 
-const storageDir = path.join(process.cwd(), "storage");
+// Vercel only allows writes to /tmp in production
+const storageDir = process.env.VERCEL ? path.join("/tmp", "ymm-storage") : path.join(process.cwd(), "storage");
 export const auditWorkbookPath = path.join(storageDir, "audit-requests.xlsx");
 const sheetName = "Audit Requests";
 
