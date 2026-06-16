@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: validation.message }, { status: 400 });
     }
 
-    const record = appendAuditRequest({
+    const record = await appendAuditRequest({
       name: payload.name,
       businessName: payload.businessName,
       businessType: payload.businessType,
@@ -52,5 +52,5 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  return NextResponse.json({ requests: readAuditRequests() });
+  return NextResponse.json({ requests: await readAuditRequests() });
 }

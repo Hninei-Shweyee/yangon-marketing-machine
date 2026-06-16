@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
 import { NextRequest, NextResponse } from "next/server";
-import { auditWorkbookPath, readAuditRequests } from "@/lib/auditRequests";
+import { generateExcelBuffer } from "@/lib/auditRequests";
 
 export const runtime = "nodejs";
 
@@ -11,10 +10,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  readAuditRequests();
-  const file = await readFile(auditWorkbookPath);
+  const buffer = await generateExcelBuffer();
 
-  return new NextResponse(file, {
+  return new NextResponse(new Uint8Array(buffer), {
     headers: {
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "Content-Disposition": 'attachment; filename="audit-requests.xlsx"'
