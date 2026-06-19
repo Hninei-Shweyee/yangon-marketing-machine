@@ -1,4 +1,5 @@
-import { put, list } from "@vercel/blob";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import * as XLSX from "xlsx";
 
 export type AuditRequestInput = {
@@ -21,25 +22,43 @@ export type AuditRequestRecord = AuditRequestInput & {
   followUpDate: string;
 };
 
-const BLOB_PATH = "ymm-data/audit-requests.json";
-const BLOB_PREFIX = "ymm-data/";
+// Storage paths — Vercel can write to /tmp
+const storageDir = process.env.VERCEL
+  ? path.join("/tmp", "ymm-storage")
+  : path.join(process.cwd(), "storage");
+
+const jsonPath = path.join(storageDir, "audit-requests.json");
+const xlsxPath = path.join(storageDir, "audit-requests.xlsx");
+const sheetName = "Audit Requests";
 
 const headers = [
-  "ID",
-  "Submitted At",
-  "Status",
-  "Name",
-  "Business Name",
-  "Business Type",
-  "Facebook Page Link",
-  "Phone / Viber / Telegram",
-  "Main Marketing Problem",
-  "Interested Package",
-  "Monthly Marketing Budget Range",
-  "Improve Areas",
-  "Admin Notes",
-  "Follow-up Date"
+  "ID", "Submitted At", "Status", "Name", "Business Name", "Business Type",
+  "Facebook Page Link", "Phone / Viber / Telegram", "Main Marketing Problem",
+  "Interested Package", "Monthly Marketing Budget Range", "Improve Areas",
+  "Admin Notes", "Follow-up Date"
 ];
+
+let blobAvailable: boolean | null = null;
+
+async function hasBlob(): Promise<boolean> {
+  if (blobAvailable !== null) return blobAvailable;
+
+  // Only try Blob when BLOB_READ_WRITE_TOKEN is set
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    blobAvailable = false;
+    return false;
+  }
+
+  try {
+    const { list } = await import("@vercel/blob");
+    await list({ prefix: "ymm-data/", limit: 1 });
+    blobAvailable = true;
+  } catch {
+    blobAvailable = false;
+  }
+
+  return blobAvailable;
+}
 
 export function validateAuditRequest(payload: Partial<AuditRequestInput>) {
   const missing = ["name", "businessName", "contact", "problem", "package", "budget"].filter((field) => {
@@ -61,29 +80,49 @@ export async function appendAuditRequest(input: AuditRequestInput): Promise<Audi
 
   const json = JSON.stringify(existing, null, 2);
 
-  // Upload to Vercel Blob (persists across cold starts)
-  await put(BLOB_PATH, json, {
-    access: "public",
-    contentType: "application/json",
-    addRandomSuffix: false
-  });
+  if (await hasBlob()) {
+    const { put } = await import("@vercel/blob");
+    await put("ymm-data/audit-requests.json", json, {
+      access: "public",
+      contentType: "application/json",
+      addRandomSuffix: false
+    });
+  }
+
+  // Always save locally too (backup)
+  ensureDir();
+  writeFileSync(jsonPath, json, "utf-8");
+  syncExcel(existing);
 
   return record;
 }
 
 export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
+  // Try Blob first, fall back to local
+  if (await hasBlob()) {
+    try {
+      const { list } = await import("@vercel/blob");
+      const { blobs } = await list({ prefix: "ymm-data/" });
+      const dataBlob = blobs.find((b) => b.pathname === "ymm-data/audit-requests.json");
+
+      if (dataBlob) {
+        const response = await fetch(dataBlob.url);
+        if (response.ok) {
+          const records: AuditRequestRecord[] = await response.json();
+          return records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+        }
+      }
+    } catch {
+      // Blob read failed — fall through to local
+    }
+  }
+
+  // Local fallback
+  if (!existsSync(jsonPath)) return [];
+
   try {
-    const { blobs } = await list({ prefix: BLOB_PREFIX });
-
-    // Find our data file
-    const dataBlob = blobs.find((b) => b.pathname === BLOB_PATH);
-    if (!dataBlob) return [];
-
-    const response = await fetch(dataBlob.url);
-    if (!response.ok) return [];
-
-    const records: AuditRequestRecord[] = await response.json();
-
+    const raw = readFileSync(jsonPath, "utf-8");
+    const records: AuditRequestRecord[] = JSON.parse(raw);
     return records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
   } catch {
     return [];
@@ -97,10 +136,26 @@ export async function generateExcelBuffer(): Promise<Buffer> {
 
   const workbook = XLSX.utils.book_new();
   const worksheet = XLSX.utils.aoa_to_sheet(rows);
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Audit Requests");
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
 
   const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
   return Buffer.from(buffer);
+}
+
+function ensureDir() {
+  if (!existsSync(storageDir)) {
+    mkdirSync(storageDir, { recursive: true });
+  }
+}
+
+function syncExcel(records: AuditRequestRecord[]) {
+  const rows = [headers, ...records.map(recordToRow)];
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  ensureDir();
+  writeFileSync(xlsxPath, Buffer.from(buffer));
 }
 
 function createRecord(input: AuditRequestInput): AuditRequestRecord {
@@ -124,19 +179,9 @@ function createRecord(input: AuditRequestInput): AuditRequestRecord {
 
 function recordToRow(record: AuditRequestRecord) {
   return [
-    record.id,
-    record.submittedAt,
-    record.status,
-    record.name,
-    record.businessName,
-    record.businessType ?? "",
-    record.facebookPage ?? "",
-    record.contact,
-    record.problem,
-    record.package,
-    record.budget,
-    record.improvements.join(", "),
-    record.adminNotes,
-    record.followUpDate
+    record.id, record.submittedAt, record.status, record.name,
+    record.businessName, record.businessType ?? "", record.facebookPage ?? "",
+    record.contact, record.problem, record.package, record.budget,
+    record.improvements.join(", "), record.adminNotes, record.followUpDate
   ];
 }

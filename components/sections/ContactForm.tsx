@@ -72,13 +72,14 @@ export function ContactForm() {
       });
 
       if (!response.ok) {
-        throw new Error("Could not save your request.");
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message || "Could not save your request.");
       }
 
       setSubmitted(true);
       setForm(initialState);
-    } catch {
-      setError("Sorry, your request could not be saved. Please try again or contact us directly.");
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "Sorry, your request could not be saved. Please try again or contact us directly.");
     } finally {
       setIsSubmitting(false);
     }
