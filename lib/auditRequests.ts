@@ -37,10 +37,10 @@ const headers = [
   "Admin Notes", "Follow-up Date"
 ];
 
-const DATA_PREFIX = "ymm-data/audit-requests-";
+// Each record = its own blob file (ymm-data/record-YMM-12345.json)
+// Never overwrite — no data loss possible
+const RECORD_PREFIX = "ymm-data/record-";
 
-// In-memory cache — when POST and GET share a warm instance, reads are instant
-let cachedRecords: AuditRequestRecord[] | null = null;
 let blobAvailable: boolean | null = null;
 
 async function hasBlob(): Promise<boolean> {
@@ -51,7 +51,7 @@ async function hasBlob(): Promise<boolean> {
   }
   try {
     const { list } = await import("@vercel/blob");
-    await list({ prefix: DATA_PREFIX, limit: 1 });
+    await list({ prefix: RECORD_PREFIX, limit: 1 });
     blobAvailable = true;
   } catch {
     blobAvailable = false;
@@ -71,83 +71,66 @@ export function validateAuditRequest(payload: Partial<AuditRequestInput>) {
 }
 
 export async function appendAuditRequest(input: AuditRequestInput): Promise<AuditRequestRecord> {
-  const existing = await readAuditRequests();
   const record = createRecord(input);
-  existing.push(record);
 
-  const json = JSON.stringify(existing, null, 2);
-
+  // Upload this single record as its own blob file
   if (await hasBlob()) {
-    const { put, list, del } = await import("@vercel/blob");
-
-    // Each write gets a UNIQUE filename — no CDN caching possible
-    await put(`${DATA_PREFIX}${Date.now()}.json`, json, {
+    const { put } = await import("@vercel/blob");
+    await put(`${RECORD_PREFIX}${record.id}.json`, JSON.stringify(record), {
       access: "public",
       contentType: "application/json"
     });
-
-    // Clean up old blobs (keep only the latest 3)
-    try {
-      const { blobs } = await list({ prefix: DATA_PREFIX });
-      const sorted = blobs.sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime());
-      for (const old of sorted.slice(3)) {
-        await del(old.url).catch(() => {});
-      }
-    } catch { /* cleanup is best-effort */ }
   }
 
-  // Always save locally too
+  // Update local backup: read existing, append, save
+  const localRecords = readLocalRecords();
+  localRecords.push(record);
   ensureDir();
-  writeFileSync(jsonPath, json, "utf-8");
-  syncExcel(existing);
-
-  // Update in-memory cache
-  cachedRecords = existing;
+  writeFileSync(jsonPath, JSON.stringify(localRecords, null, 2), "utf-8");
+  syncExcel(localRecords);
 
   return record;
 }
 
 export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
-  // In-memory cache — instant when warm instance handles both POST and GET
-  if (cachedRecords) return cachedRecords;
-
   if (await hasBlob()) {
     try {
       const { list } = await import("@vercel/blob");
-      const { blobs } = await list({ prefix: DATA_PREFIX });
+      const { blobs } = await list({ prefix: RECORD_PREFIX });
 
       if (blobs.length > 0) {
-        const latest = blobs.sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime())[0];
+        // Fetch ALL record blobs in parallel
+        const results = await Promise.allSettled(
+          blobs.map((b) =>
+            fetch(b.url, { cache: "no-store" }).then((r) => r.json())
+          )
+        );
 
-        const response = await fetch(latest.url, { cache: "no-store" });
-        if (response.ok) {
-          const records: AuditRequestRecord[] = await response.json();
-          const sorted = records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+        const records: AuditRequestRecord[] = [];
+        for (const result of results) {
+          if (result.status === "fulfilled" && result.value?.id) {
+            records.push(result.value as AuditRequestRecord);
+          }
+        }
 
-          cachedRecords = sorted;
+        const sorted = records.sort(
+          (a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt)
+        );
 
+        // Sync local backup
+        if (sorted.length > 0) {
           try {
             ensureDir();
             writeFileSync(jsonPath, JSON.stringify(sorted, null, 2), "utf-8");
           } catch { /* best effort */ }
-
-          return sorted;
         }
+
+        return sorted;
       }
     } catch { /* fall through */ }
   }
 
-  // Local fallback
-  if (!existsSync(jsonPath)) return [];
-  try {
-    const raw = readFileSync(jsonPath, "utf-8");
-    const records: AuditRequestRecord[] = JSON.parse(raw);
-    const sorted = records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
-    cachedRecords = sorted;
-    return sorted;
-  } catch {
-    return [];
-  }
+  return readLocalRecords();
 }
 
 export async function generateExcelBuffer(): Promise<Buffer> {
@@ -158,6 +141,17 @@ export async function generateExcelBuffer(): Promise<Buffer> {
   XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
   const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
   return Buffer.from(buffer);
+}
+
+function readLocalRecords(): AuditRequestRecord[] {
+  if (!existsSync(jsonPath)) return [];
+  try {
+    const raw = readFileSync(jsonPath, "utf-8");
+    const records: AuditRequestRecord[] = JSON.parse(raw);
+    return records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+  } catch {
+    return [];
+  }
 }
 
 function ensureDir() {
