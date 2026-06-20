@@ -37,8 +37,7 @@ const headers = [
   "Admin Notes", "Follow-up Date"
 ];
 
-// Each record = its own blob file (ymm-data/record-YMM-12345.json)
-// Never overwrite — no data loss possible
+// Each record = its own blob file — no overwrite possible
 const RECORD_PREFIX = "ymm-data/record-";
 
 let blobAvailable: boolean | null = null;
@@ -56,6 +55,7 @@ async function hasBlob(): Promise<boolean> {
   } catch {
     blobAvailable = false;
   }
+  console.log("hasBlob =>", blobAvailable);
   return blobAvailable;
 }
 
@@ -72,52 +72,70 @@ export function validateAuditRequest(payload: Partial<AuditRequestInput>) {
 
 export async function appendAuditRequest(input: AuditRequestInput): Promise<AuditRequestRecord> {
   const record = createRecord(input);
+  console.log("appendAuditRequest: saving", record.id);
 
-  // Upload this single record as its own blob file
+  // Save to Blob with ZERO CDN cache
   if (await hasBlob()) {
     const { put } = await import("@vercel/blob");
-    await put(`${RECORD_PREFIX}${record.id}.json`, JSON.stringify(record), {
+    const blobPath = `${RECORD_PREFIX}${record.id}.json`;
+    const result = await put(blobPath, JSON.stringify(record), {
       access: "public",
-      contentType: "application/json"
+      contentType: "application/json",
+      cacheControlMaxAge: 0    // disable CDN caching
     });
+    console.log("Blob put OK:", result.pathname);
   }
 
-  // Update local backup: read existing, append, save
+  // Always update local /tmp too
   const localRecords = readLocalRecords();
   localRecords.push(record);
   ensureDir();
   writeFileSync(jsonPath, JSON.stringify(localRecords, null, 2), "utf-8");
   syncExcel(localRecords);
+  console.log("Local save OK:", localRecords.length, "records");
 
   return record;
 }
 
 export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
+  // Check local /tmp first (instant, always fresh for same instance)
+  const local = readLocalRecords();
+  if (local.length > 0) {
+    console.log("readAuditRequests: returning", local.length, "from local");
+    return local;
+  }
+
+  // Cross-instance fallback: load from Blob
   if (await hasBlob()) {
     try {
       const { list } = await import("@vercel/blob");
       const { blobs } = await list({ prefix: RECORD_PREFIX });
+      console.log("Blob list found:", blobs.length, "files");
 
       if (blobs.length > 0) {
-        // Fetch ALL record blobs in parallel
         const results = await Promise.allSettled(
-          blobs.map((b) =>
-            fetch(b.url, { cache: "no-store" }).then((r) => r.json())
-          )
+          blobs.map(async (b) => {
+            const res = await fetch(b.url, { cache: "no-store" });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json() as Promise<AuditRequestRecord>;
+          })
         );
 
         const records: AuditRequestRecord[] = [];
         for (const result of results) {
           if (result.status === "fulfilled" && result.value?.id) {
-            records.push(result.value as AuditRequestRecord);
+            records.push(result.value);
+          } else if (result.status === "rejected") {
+            console.log("Blob fetch failed:", result.reason);
           }
         }
 
         const sorted = records.sort(
           (a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt)
         );
+        console.log("readAuditRequests: returning", sorted.length, "from Blob");
 
-        // Sync local backup
+        // Sync local for faster next read
         if (sorted.length > 0) {
           try {
             ensureDir();
@@ -127,10 +145,12 @@ export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
 
         return sorted;
       }
-    } catch { /* fall through */ }
+    } catch (err) {
+      console.error("Blob read error:", err);
+    }
   }
 
-  return readLocalRecords();
+  return [];
 }
 
 export async function generateExcelBuffer(): Promise<Buffer> {
