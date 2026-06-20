@@ -83,7 +83,7 @@ export async function appendAuditRequest(input: AuditRequestInput): Promise<Audi
   if (await hasBlob()) {
     const { put } = await import("@vercel/blob");
     await put("ymm-data/audit-requests.json", json, {
-      access: "public",
+      access: "private",
       contentType: "application/json",
       addRandomSuffix: false
     });
@@ -106,8 +106,8 @@ export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
       const dataBlob = blobs.find((b) => b.pathname === "ymm-data/audit-requests.json");
 
       if (dataBlob) {
-        // cache: 'no-store' prevents CDN from returning stale empty data
-        const response = await fetch(dataBlob.url, { cache: "no-store" });
+        // Cache-bust to prevent Vercel CDN from returning stale empty data
+        const response = await fetch(`${dataBlob.url}?t=${Date.now()}`);
         if (response.ok) {
           const records: AuditRequestRecord[] = await response.json();
           const sorted = records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
