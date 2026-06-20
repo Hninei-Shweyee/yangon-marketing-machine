@@ -22,7 +22,6 @@ export type AuditRequestRecord = AuditRequestInput & {
   followUpDate: string;
 };
 
-// Storage paths — Vercel can write to /tmp
 const storageDir = process.env.VERCEL
   ? path.join("/tmp", "ymm-storage")
   : path.join(process.cwd(), "storage");
@@ -38,29 +37,25 @@ const headers = [
   "Admin Notes", "Follow-up Date"
 ];
 
-let blobAvailable: boolean | null = null;
+const DATA_PREFIX = "ymm-data/audit-requests-";
 
-// In-memory cache — instant reads after a write on the same instance
-// (Vercel serverless keeps module state warm across invocations)
+// In-memory cache — when POST and GET share a warm instance, reads are instant
 let cachedRecords: AuditRequestRecord[] | null = null;
+let blobAvailable: boolean | null = null;
 
 async function hasBlob(): Promise<boolean> {
   if (blobAvailable !== null) return blobAvailable;
-
-  // Only try Blob when BLOB_READ_WRITE_TOKEN is set
   if (!process.env.BLOB_READ_WRITE_TOKEN) {
     blobAvailable = false;
     return false;
   }
-
   try {
     const { list } = await import("@vercel/blob");
-    await list({ prefix: "ymm-data/", limit: 1 });
+    await list({ prefix: DATA_PREFIX, limit: 1 });
     blobAvailable = true;
   } catch {
     blobAvailable = false;
   }
-
   return blobAvailable;
 }
 
@@ -69,11 +64,9 @@ export function validateAuditRequest(payload: Partial<AuditRequestInput>) {
     const value = payload[field as keyof AuditRequestInput];
     return typeof value !== "string" || value.trim().length === 0;
   });
-
   if (missing.length > 0) {
     return { valid: false, message: `Missing required fields: ${missing.join(", ")}` };
   }
-
   return { valid: true, message: "" };
 }
 
@@ -85,65 +78,67 @@ export async function appendAuditRequest(input: AuditRequestInput): Promise<Audi
   const json = JSON.stringify(existing, null, 2);
 
   if (await hasBlob()) {
-    const { put } = await import("@vercel/blob");
-    await put("ymm-data/audit-requests.json", json, {
-      access: "private",
-      contentType: "application/json",
-      addRandomSuffix: false
+    const { put, list, del } = await import("@vercel/blob");
+
+    // Each write gets a UNIQUE filename — no CDN caching possible
+    await put(`${DATA_PREFIX}${Date.now()}.json`, json, {
+      access: "public",
+      contentType: "application/json"
     });
+
+    // Clean up old blobs (keep only the latest 3)
+    try {
+      const { blobs } = await list({ prefix: DATA_PREFIX });
+      const sorted = blobs.sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime());
+      for (const old of sorted.slice(3)) {
+        await del(old.url).catch(() => {});
+      }
+    } catch { /* cleanup is best-effort */ }
   }
 
-  // Update in-memory cache so reads are instant
-  cachedRecords = existing;
-
-  // Always save locally too (backup)
+  // Always save locally too
   ensureDir();
   writeFileSync(jsonPath, json, "utf-8");
   syncExcel(existing);
+
+  // Update in-memory cache
+  cachedRecords = existing;
 
   return record;
 }
 
 export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
-  // Return in-memory cache immediately if available (instant, no network)
-  if (cachedRecords) {
-    return cachedRecords;
-  }
+  // In-memory cache — instant when warm instance handles both POST and GET
+  if (cachedRecords) return cachedRecords;
 
-  // Always read from Blob first (authoritative source, persistent)
   if (await hasBlob()) {
     try {
       const { list } = await import("@vercel/blob");
-      const { blobs } = await list({ prefix: "ymm-data/" });
-      const dataBlob = blobs.find((b) => b.pathname === "ymm-data/audit-requests.json");
+      const { blobs } = await list({ prefix: DATA_PREFIX });
 
-      if (dataBlob) {
-        // Cache-bust to prevent Vercel CDN from returning stale empty data
-        const response = await fetch(`${dataBlob.url}?t=${Date.now()}`);
+      if (blobs.length > 0) {
+        const latest = blobs.sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime())[0];
+
+        const response = await fetch(latest.url, { cache: "no-store" });
         if (response.ok) {
           const records: AuditRequestRecord[] = await response.json();
           const sorted = records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
 
-          // Warm the in-memory cache so next read is instant
           cachedRecords = sorted;
 
-          // Sync to local so fallback has latest data too
           try {
             ensureDir();
             writeFileSync(jsonPath, JSON.stringify(sorted, null, 2), "utf-8");
-          } catch { /* ignore — best effort */ }
+          } catch { /* best effort */ }
 
           return sorted;
         }
       }
-    } catch {
-      // Blob read failed — fall through to local
-    }
+    } catch { /* fall through */ }
   }
 
   // Local fallback
   if (!existsSync(jsonPath)) return [];
-
   try {
     const raw = readFileSync(jsonPath, "utf-8");
     const records: AuditRequestRecord[] = JSON.parse(raw);
@@ -157,21 +152,16 @@ export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
 
 export async function generateExcelBuffer(): Promise<Buffer> {
   const records = await readAuditRequests();
-
   const rows = [headers, ...records.map(recordToRow)];
-
   const workbook = XLSX.utils.book_new();
   const worksheet = XLSX.utils.aoa_to_sheet(rows);
   XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
-
   const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
   return Buffer.from(buffer);
 }
 
 function ensureDir() {
-  if (!existsSync(storageDir)) {
-    mkdirSync(storageDir, { recursive: true });
-  }
+  if (!existsSync(storageDir)) mkdirSync(storageDir, { recursive: true });
 }
 
 function syncExcel(records: AuditRequestRecord[]) {
