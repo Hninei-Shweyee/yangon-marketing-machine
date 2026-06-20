@@ -98,7 +98,7 @@ export async function appendAuditRequest(input: AuditRequestInput): Promise<Audi
 }
 
 export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
-  // Try Blob first, fall back to local
+  // Always read from Blob first (authoritative source, persistent)
   if (await hasBlob()) {
     try {
       const { list } = await import("@vercel/blob");
@@ -106,10 +106,19 @@ export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
       const dataBlob = blobs.find((b) => b.pathname === "ymm-data/audit-requests.json");
 
       if (dataBlob) {
-        const response = await fetch(dataBlob.url);
+        // cache: 'no-store' prevents CDN from returning stale empty data
+        const response = await fetch(dataBlob.url, { cache: "no-store" });
         if (response.ok) {
           const records: AuditRequestRecord[] = await response.json();
-          return records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+          const sorted = records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+
+          // Sync to local so fallback has latest data too
+          try {
+            ensureDir();
+            writeFileSync(jsonPath, JSON.stringify(sorted, null, 2), "utf-8");
+          } catch { /* ignore — best effort */ }
+
+          return sorted;
         }
       }
     } catch {
