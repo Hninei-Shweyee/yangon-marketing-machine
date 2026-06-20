@@ -40,6 +40,10 @@ const headers = [
 
 let blobAvailable: boolean | null = null;
 
+// In-memory cache — instant reads after a write on the same instance
+// (Vercel serverless keeps module state warm across invocations)
+let cachedRecords: AuditRequestRecord[] | null = null;
+
 async function hasBlob(): Promise<boolean> {
   if (blobAvailable !== null) return blobAvailable;
 
@@ -89,6 +93,9 @@ export async function appendAuditRequest(input: AuditRequestInput): Promise<Audi
     });
   }
 
+  // Update in-memory cache so reads are instant
+  cachedRecords = existing;
+
   // Always save locally too (backup)
   ensureDir();
   writeFileSync(jsonPath, json, "utf-8");
@@ -98,6 +105,11 @@ export async function appendAuditRequest(input: AuditRequestInput): Promise<Audi
 }
 
 export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
+  // Return in-memory cache immediately if available (instant, no network)
+  if (cachedRecords) {
+    return cachedRecords;
+  }
+
   // Always read from Blob first (authoritative source, persistent)
   if (await hasBlob()) {
     try {
@@ -111,6 +123,9 @@ export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
         if (response.ok) {
           const records: AuditRequestRecord[] = await response.json();
           const sorted = records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+
+          // Warm the in-memory cache so next read is instant
+          cachedRecords = sorted;
 
           // Sync to local so fallback has latest data too
           try {
@@ -132,7 +147,9 @@ export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
   try {
     const raw = readFileSync(jsonPath, "utf-8");
     const records: AuditRequestRecord[] = JSON.parse(raw);
-    return records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+    const sorted = records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+    cachedRecords = sorted;
+    return sorted;
   } catch {
     return [];
   }
