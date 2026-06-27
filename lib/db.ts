@@ -8,14 +8,13 @@ function sql() {
 
   const url = process.env.DATABASE_URL;
   if (!url) {
-    throw new Error("DATABASE_URL environment variable is not set");
+    throw new Error("DATABASE_URL not set");
   }
 
   sqlInstance = neon(url);
   return sqlInstance;
 }
 
-// Create the table on first use (idempotent)
 let tableReady = false;
 
 export async function ensureTable(): Promise<void> {
@@ -41,6 +40,10 @@ export async function ensureTable(): Promise<void> {
   `;
 
   tableReady = true;
+}
+
+export function hasDatabase(): boolean {
+  return !!process.env.DATABASE_URL;
 }
 
 export { sql };

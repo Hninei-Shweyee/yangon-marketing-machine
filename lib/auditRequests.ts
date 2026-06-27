@@ -1,4 +1,6 @@
-import { ensureTable, sql } from "@/lib/db";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { ensureTable, hasDatabase, sql } from "@/lib/db";
 
 export type AuditRequestInput = {
   name: string;
@@ -20,6 +22,10 @@ export type AuditRequestRecord = AuditRequestInput & {
   followUpDate: string;
 };
 
+// Local /tmp fallback for when Neon isn't connected yet
+const storageDir = path.join("/tmp", "ymm-storage");
+const jsonPath = path.join(storageDir, "audit-requests.json");
+
 export function validateAuditRequest(payload: Partial<AuditRequestInput>) {
   const missing = ["name", "businessName", "contact", "problem", "package", "budget"].filter((field) => {
     const value = payload[field as keyof AuditRequestInput];
@@ -32,8 +38,6 @@ export function validateAuditRequest(payload: Partial<AuditRequestInput>) {
 }
 
 export async function appendAuditRequest(input: AuditRequestInput): Promise<AuditRequestRecord> {
-  await ensureTable();
-
   const record: AuditRequestRecord = {
     id: `YMM-${Date.now()}`,
     submittedAt: new Date().toISOString(),
@@ -51,36 +55,59 @@ export async function appendAuditRequest(input: AuditRequestInput): Promise<Audi
     followUpDate: ""
   };
 
-  await sql()`
-    INSERT INTO audit_requests (
-      id, submitted_at, status, name, business_name, business_type,
-      facebook_page, contact, problem, package, budget,
-      improvements, admin_notes, follow_up_date
-    ) VALUES (
-      ${record.id}, ${record.submittedAt}, ${record.status},
-      ${record.name}, ${record.businessName}, ${record.businessType},
-      ${record.facebookPage}, ${record.contact}, ${record.problem},
-      ${record.package}, ${record.budget},
-      ${record.improvements}, ${record.adminNotes}, ${record.followUpDate}
-    )
-  `;
+  if (hasDatabase()) {
+    await ensureTable();
+    await sql()`
+      INSERT INTO audit_requests (
+        id, submitted_at, status, name, business_name, business_type,
+        facebook_page, contact, problem, package, budget,
+        improvements, admin_notes, follow_up_date
+      ) VALUES (
+        ${record.id}, ${record.submittedAt}, ${record.status},
+        ${record.name}, ${record.businessName}, ${record.businessType},
+        ${record.facebookPage}, ${record.contact}, ${record.problem},
+        ${record.package}, ${record.budget},
+        ${record.improvements}, ${record.adminNotes}, ${record.followUpDate}
+      )
+    `;
+  }
+
+  // Always save to /tmp as backup
+  const local = readLocal();
+  local.push(record);
+  saveLocal(local);
 
   return record;
 }
 
 export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
-  await ensureTable();
+  if (hasDatabase()) {
+    try {
+      await ensureTable();
+      const rows = await sql()`
+        SELECT
+          id, submitted_at, status, name, business_name, business_type,
+          facebook_page, contact, problem, package, budget,
+          improvements, admin_notes, follow_up_date
+        FROM audit_requests
+        ORDER BY submitted_at DESC
+      `;
 
-  const rows = await sql()`
-    SELECT
-      id, submitted_at, status, name, business_name, business_type,
-      facebook_page, contact, problem, package, budget,
-      improvements, admin_notes, follow_up_date
-    FROM audit_requests
-    ORDER BY submitted_at DESC
-  `;
+      const records = (rows as Record<string, unknown>[]).map(rowToRecord);
 
-  return (rows as Record<string, unknown>[]).map(rowToRecord);
+      // Sync to /tmp
+      if (records.length > 0) {
+        try { saveLocal(records); } catch {}
+      }
+
+      return records;
+    } catch (err) {
+      console.error("Neon read failed, falling back to local:", err);
+      // Fall through to local
+    }
+  }
+
+  return readLocal();
 }
 
 export async function updateAuditRequestStatus(
@@ -89,19 +116,28 @@ export async function updateAuditRequestStatus(
   adminNotes: string,
   followUpDate: string
 ): Promise<void> {
-  await ensureTable();
-  await sql()`
-    UPDATE audit_requests
-    SET status = ${status}, admin_notes = ${adminNotes}, follow_up_date = ${followUpDate}
-    WHERE id = ${id}
-  `;
+  if (hasDatabase()) {
+    await ensureTable();
+    await sql()`
+      UPDATE audit_requests
+      SET status = ${status}, admin_notes = ${adminNotes}, follow_up_date = ${followUpDate}
+      WHERE id = ${id}
+    `;
+  }
+
+  // Also update local
+  const local = readLocal();
+  const idx = local.findIndex((r) => r.id === id);
+  if (idx >= 0) {
+    local[idx] = { ...local[idx], status, adminNotes, followUpDate };
+    saveLocal(local);
+  }
 }
 
-// For Excel export using xlsx library
 export async function generateExcelBuffer(): Promise<Buffer> {
   const records = await readAuditRequests();
-
   const XLSX = await import("xlsx");
+
   const headers = [
     "ID", "Submitted At", "Status", "Name", "Business Name", "Business Type",
     "Facebook Page Link", "Phone / Viber / Telegram", "Main Marketing Problem",
@@ -116,6 +152,26 @@ export async function generateExcelBuffer(): Promise<Buffer> {
   const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
   return Buffer.from(buffer);
 }
+
+// --- Local /tmp helpers ---
+
+function readLocal(): AuditRequestRecord[] {
+  if (!existsSync(jsonPath)) return [];
+  try {
+    const raw = readFileSync(jsonPath, "utf-8");
+    const records: AuditRequestRecord[] = JSON.parse(raw);
+    return records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
+  } catch {
+    return [];
+  }
+}
+
+function saveLocal(records: AuditRequestRecord[]) {
+  if (!existsSync(storageDir)) mkdirSync(storageDir, { recursive: true });
+  writeFileSync(jsonPath, JSON.stringify(records, null, 2), "utf-8");
+}
+
+// --- Helpers ---
 
 function rowToRecord(row: Record<string, unknown>): AuditRequestRecord {
   return {
