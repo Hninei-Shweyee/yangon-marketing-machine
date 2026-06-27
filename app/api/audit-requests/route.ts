@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { appendAuditRequest, readAuditRequests, validateAuditRequest } from "@/lib/auditRequests";
+import {
+  appendAuditRequest,
+  readAuditRequests,
+  updateAuditRequestStatus,
+  validateAuditRequest
+} from "@/lib/auditRequests";
 import { sendAuditNotification } from "@/lib/email";
 
 export const runtime = "nodejs";
@@ -53,4 +58,25 @@ export async function GET(request: NextRequest) {
   }
 
   return NextResponse.json({ requests: await readAuditRequests() });
+}
+
+export async function PATCH(request: NextRequest) {
+  if (request.headers.get("x-admin-password") !== adminPassword) {
+    return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    const { id, status, adminNotes, followUpDate } = await request.json();
+
+    if (!id || !status) {
+      return NextResponse.json({ message: "id and status are required" }, { status: 400 });
+    }
+
+    await updateAuditRequestStatus(id, status, adminNotes ?? "", followUpDate ?? "");
+
+    return NextResponse.json({ message: "Status updated" });
+  } catch (error) {
+    console.error("Status update failed", error);
+    return NextResponse.json({ message: "Could not update status" }, { status: 500 });
+  }
 }

@@ -1,6 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import * as XLSX from "xlsx";
+import { ensureTable, sql } from "@/lib/db";
 
 export type AuditRequestInput = {
   name: string;
@@ -22,29 +20,6 @@ export type AuditRequestRecord = AuditRequestInput & {
   followUpDate: string;
 };
 
-// /tmp for fast same-instance reads on Vercel
-const storageDir = process.env.VERCEL
-  ? path.join("/tmp", "ymm-storage")
-  : path.join(process.cwd(), "storage");
-
-const jsonPath = path.join(storageDir, "audit-requests.json");
-const xlsxPath = path.join(storageDir, "audit-requests.xlsx");
-const sheetName = "Audit Requests";
-
-const headers = [
-  "ID", "Submitted At", "Status", "Name", "Business Name", "Business Type",
-  "Facebook Page Link", "Phone / Viber / Telegram", "Main Marketing Problem",
-  "Interested Package", "Monthly Marketing Budget Range", "Improve Areas",
-  "Admin Notes", "Follow-up Date"
-];
-
-// Each booking = its own immutable Blob file → no race condition, no overwrites
-const RECORD_PREFIX = "ymm-data/record-";
-
-function hasBlob(): boolean {
-  return !!process.env.BLOB_READ_WRITE_TOKEN;
-}
-
 export function validateAuditRequest(payload: Partial<AuditRequestInput>) {
   const missing = ["name", "businessName", "contact", "problem", "package", "budget"].filter((field) => {
     const value = payload[field as keyof AuditRequestInput];
@@ -57,111 +32,9 @@ export function validateAuditRequest(payload: Partial<AuditRequestInput>) {
 }
 
 export async function appendAuditRequest(input: AuditRequestInput): Promise<AuditRequestRecord> {
-  const record = createRecord(input);
+  await ensureTable();
 
-  // Upload as individual immutable blob (no race condition possible)
-  if (hasBlob()) {
-    const { put } = await import("@vercel/blob");
-    await put(`${RECORD_PREFIX}${record.id}.json`, JSON.stringify(record), {
-      access: "public",
-      contentType: "application/json",
-      addRandomSuffix: false,
-      cacheControlMaxAge: 0
-    });
-  }
-
-  // Update local /tmp for fast same-instance reads
-  const local = readLocalRecords();
-  local.push(record);
-  ensureDir();
-  writeFileSync(jsonPath, JSON.stringify(local, null, 2), "utf-8");
-  syncExcel(local);
-
-  return record;
-}
-
-export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
-  // Fast path: same instance as write → /tmp has latest
-  const local = readLocalRecords();
-  if (local.length > 0) return local;
-
-  // Slow path: new instance → load all records from Blob
-  if (hasBlob()) {
-    try {
-      const { list } = await import("@vercel/blob");
-      const { blobs } = await list({ prefix: RECORD_PREFIX });
-
-      if (blobs.length > 0) {
-        const results = await Promise.allSettled(
-          blobs.map((b) =>
-            fetch(b.url, { cache: "no-store" }).then((r) => r.json())
-          )
-        );
-
-        const records: AuditRequestRecord[] = [];
-        for (const r of results) {
-          if (r.status === "fulfilled" && r.value?.id) {
-            records.push(r.value);
-          }
-        }
-
-        const sorted = records.sort(
-          (a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt)
-        );
-
-        // Warm /tmp for next read on this instance
-        if (sorted.length > 0) {
-          try {
-            ensureDir();
-            writeFileSync(jsonPath, JSON.stringify(sorted, null, 2), "utf-8");
-          } catch {}
-        }
-
-        return sorted;
-      }
-    } catch {}
-  }
-
-  return [];
-}
-
-export async function generateExcelBuffer(): Promise<Buffer> {
-  const records = await readAuditRequests();
-  const rows = [headers, ...records.map(recordToRow)];
-  const workbook = XLSX.utils.book_new();
-  const worksheet = XLSX.utils.aoa_to_sheet(rows);
-  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
-  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
-  return Buffer.from(buffer);
-}
-
-function readLocalRecords(): AuditRequestRecord[] {
-  if (!existsSync(jsonPath)) return [];
-  try {
-    const raw = readFileSync(jsonPath, "utf-8");
-    const records: AuditRequestRecord[] = JSON.parse(raw);
-    return records.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
-  } catch {
-    return [];
-  }
-}
-
-function ensureDir() {
-  if (!existsSync(storageDir)) mkdirSync(storageDir, { recursive: true });
-}
-
-function syncExcel(records: AuditRequestRecord[]) {
-  const rows = [headers, ...records.map(recordToRow)];
-  const workbook = XLSX.utils.book_new();
-  const worksheet = XLSX.utils.aoa_to_sheet(rows);
-  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
-  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
-  ensureDir();
-  writeFileSync(xlsxPath, Buffer.from(buffer));
-}
-
-function createRecord(input: AuditRequestInput): AuditRequestRecord {
-  return {
+  const record: AuditRequestRecord = {
     id: `YMM-${Date.now()}`,
     submittedAt: new Date().toISOString(),
     status: "New",
@@ -177,6 +50,90 @@ function createRecord(input: AuditRequestInput): AuditRequestRecord {
     adminNotes: "",
     followUpDate: ""
   };
+
+  await sql()`
+    INSERT INTO audit_requests (
+      id, submitted_at, status, name, business_name, business_type,
+      facebook_page, contact, problem, package, budget,
+      improvements, admin_notes, follow_up_date
+    ) VALUES (
+      ${record.id}, ${record.submittedAt}, ${record.status},
+      ${record.name}, ${record.businessName}, ${record.businessType},
+      ${record.facebookPage}, ${record.contact}, ${record.problem},
+      ${record.package}, ${record.budget},
+      ${record.improvements}, ${record.adminNotes}, ${record.followUpDate}
+    )
+  `;
+
+  return record;
+}
+
+export async function readAuditRequests(): Promise<AuditRequestRecord[]> {
+  await ensureTable();
+
+  const rows = await sql()`
+    SELECT
+      id, submitted_at, status, name, business_name, business_type,
+      facebook_page, contact, problem, package, budget,
+      improvements, admin_notes, follow_up_date
+    FROM audit_requests
+    ORDER BY submitted_at DESC
+  `;
+
+  return (rows as Record<string, unknown>[]).map(rowToRecord);
+}
+
+export async function updateAuditRequestStatus(
+  id: string,
+  status: AuditRequestRecord["status"],
+  adminNotes: string,
+  followUpDate: string
+): Promise<void> {
+  await ensureTable();
+  await sql()`
+    UPDATE audit_requests
+    SET status = ${status}, admin_notes = ${adminNotes}, follow_up_date = ${followUpDate}
+    WHERE id = ${id}
+  `;
+}
+
+// For Excel export using xlsx library
+export async function generateExcelBuffer(): Promise<Buffer> {
+  const records = await readAuditRequests();
+
+  const XLSX = await import("xlsx");
+  const headers = [
+    "ID", "Submitted At", "Status", "Name", "Business Name", "Business Type",
+    "Facebook Page Link", "Phone / Viber / Telegram", "Main Marketing Problem",
+    "Interested Package", "Monthly Marketing Budget Range", "Improve Areas",
+    "Admin Notes", "Follow-up Date"
+  ];
+
+  const rows = [headers, ...records.map(recordToRow)];
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Audit Requests");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  return Buffer.from(buffer);
+}
+
+function rowToRecord(row: Record<string, unknown>): AuditRequestRecord {
+  return {
+    id: String(row.id ?? ""),
+    submittedAt: String(row.submitted_at ?? ""),
+    status: normalizeStatus(String(row.status ?? "")),
+    name: String(row.name ?? ""),
+    businessName: String(row.business_name ?? ""),
+    businessType: String(row.business_type ?? ""),
+    facebookPage: String(row.facebook_page ?? ""),
+    contact: String(row.contact ?? ""),
+    problem: String(row.problem ?? ""),
+    package: String(row.package ?? ""),
+    budget: String(row.budget ?? ""),
+    improvements: Array.isArray(row.improvements) ? row.improvements as string[] : [],
+    adminNotes: String(row.admin_notes ?? ""),
+    followUpDate: String(row.follow_up_date ?? "")
+  };
 }
 
 function recordToRow(record: AuditRequestRecord) {
@@ -186,4 +143,11 @@ function recordToRow(record: AuditRequestRecord) {
     record.contact, record.problem, record.package, record.budget,
     record.improvements.join(", "), record.adminNotes, record.followUpDate
   ];
+}
+
+function normalizeStatus(status: string): AuditRequestRecord["status"] {
+  if (status === "Contacted" || status === "Audit Booked" || status === "Won" || status === "Not Fit") {
+    return status;
+  }
+  return "New";
 }
