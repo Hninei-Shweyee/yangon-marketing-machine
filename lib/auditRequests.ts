@@ -67,7 +67,7 @@ export async function appendAuditRequest(input: AuditRequestInput): Promise<Audi
         ${record.name}, ${record.businessName}, ${record.businessType},
         ${record.facebookPage}, ${record.contact}, ${record.problem},
         ${record.package}, ${record.budget},
-        ${record.improvements}, ${record.adminNotes}, ${record.followUpDate}
+        ${record.improvements.join(", ")}, ${record.adminNotes}, ${record.followUpDate}
       )
     `;
   }
@@ -186,7 +186,9 @@ function rowToRecord(row: Record<string, unknown>): AuditRequestRecord {
     problem: String(row.problem ?? ""),
     package: String(row.package ?? ""),
     budget: String(row.budget ?? ""),
-    improvements: Array.isArray(row.improvements) ? row.improvements as string[] : [],
+    improvements: typeof row.improvements === "string" && row.improvements
+      ? (row.improvements as string).split(",").map((s: string) => s.trim()).filter(Boolean)
+      : [],
     adminNotes: String(row.admin_notes ?? ""),
     followUpDate: String(row.follow_up_date ?? "")
   };

@@ -73,7 +73,7 @@ export function ContactForm() {
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(data.message || "Could not save your request.");
+        throw new Error(data.detail || data.message || "Could not save your request.");
       }
 
       setSubmitted(true);

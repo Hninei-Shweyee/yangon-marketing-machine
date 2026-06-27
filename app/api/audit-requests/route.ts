@@ -48,7 +48,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ message: "Audit request saved", record }, { status: 201 });
   } catch (error) {
     console.error("Audit request save failed", error);
-    return NextResponse.json({ message: "Could not save audit request" }, { status: 500 });
+    const detail = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ message: "Could not save audit request", detail }, { status: 500 });
   }
 }
 

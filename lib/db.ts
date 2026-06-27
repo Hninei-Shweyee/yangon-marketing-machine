@@ -33,7 +33,7 @@ export async function ensureTable(): Promise<void> {
       problem TEXT NOT NULL,
       package TEXT NOT NULL,
       budget TEXT NOT NULL,
-      improvements TEXT[] DEFAULT '{}',
+      improvements TEXT DEFAULT '',
       admin_notes TEXT DEFAULT '',
       follow_up_date TEXT DEFAULT ''
     )
